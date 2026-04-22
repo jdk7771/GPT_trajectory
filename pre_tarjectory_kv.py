@@ -6,15 +6,15 @@ import numpy as np
 from torch.utils.data import Dataset,DataLoader
 
 
-"""
-为什么训练的时候不需要这个kvcache？
-
-generate为什么要shape-2 这个
-
-                    看一下是否需要RPoE 
-
-"""
 device = 'cuda' if torch.cuda.is_available else 'cpu'
+
+
+def denormalize(norm_data, d_min, d_max):
+    """将 [-1, 1] 的网络输出还原为真实的物理弧度"""
+    d_range = d_max - d_min + 1e-8
+    return (norm_data + 1.0) / 2.0 * d_range + d_min
+
+
 
 file_path = os.getcwd()
 data_path = os.path.join(file_path,"data/tardata.npy")
@@ -23,7 +23,14 @@ if not os.path.exists(data_path):
     raise FileNotFoundError("找不到数据集")
 
 data = np.load (data_path)
-data = torch.tensor(data,dtype=torch.float32,device=device)
+##归一化 数据处理   
+norm_params = np.load('data/norm_params.npy', allow_pickle=True).item()
+data_min = norm_params['min']
+data_max = norm_params['max']
+data_range = data_max - data_min + 1e-8
+data_normalized = (data - data_min) / data_range * 2 - 1
+
+data = torch.tensor(data_normalized,dtype=torch.float32,device=device)
 
 print(f"数据类型为{data.shape}")
 
@@ -55,7 +62,6 @@ class TrajectoryData(Dataset):
         x = torch.cat((endpos.unsqueeze(0) , x))
         
         return x,y,start_idx
-    
     
     
 block_size = 16
@@ -511,25 +517,31 @@ def test_generate():
     print("="*60)
     
     for i in range(15):
-        # 提取模型自己推演出的绝对坐标
-        gen_step = generated_traj[0, 2+i, :].cpu().numpy()
-        # 提取数据集中机械臂真实的运动坐标 (y_t)
-        true_step = x[b_idx, 2+i, :].cpu().numpy() 
+        # 1. 提取模型自己推演出的坐标 (此时在 [-1, 1] 归一化空间)
+        gen_step_norm = generated_traj[0, 2+i, :].cpu().numpy()
+        true_step_norm = x[b_idx, 2+i, :].cpu().numpy() 
         
-        # 计算偏离误差
-        dist = np.linalg.norm(gen_step - true_step)
+        # 2. 核心还原：转换回真实的物理弧度 (Radian)
+        # 注意：这里的 data_min 和 data_max 是你在文件开头加载的全局变量
+        gen_step_phys = denormalize(gen_step_norm, data_min, data_max)
+        true_step_phys = denormalize(true_step_norm, data_min, data_max)
+        
+        # 3. 计算真实的物理偏离误差 (欧氏距离，单位: Radian)
+        dist_phys = np.linalg.norm(gen_step_phys - true_step_phys)
         
         print(f"[Step {i+1}]")
-        print(f"  ✅ 真实应到位置: {np.round(true_step, 4)}")
-        print(f"  🤖 模型自回归到: {np.round(gen_step, 4)}")
-        print(f"  📉 漂移误差 (Drift): {dist:.6f}")
+        print(f"  ✅ 真实物理位姿: {np.round(true_step_phys, 4)}")
+        print(f"  🤖 模型自回归到: {np.round(gen_step_phys, 4)}")
+        print(f"  📉 物理漂移误差: {dist_phys:.6f} rad")
         
-    # 算一下最后一步离目标的距离
-    final_pos = generated_traj[0, -1, :].cpu().numpy()
-    final_dist = np.linalg.norm(target_pos.cpu().numpy().flatten() - final_pos)
+    # 计算最后一步的真实物理距离
+    final_pos_norm = generated_traj[0, -1, :].cpu().numpy()
+    final_pos_phys = denormalize(final_pos_norm, data_min, data_max)
+    target_phys = denormalize(target_pos.cpu().numpy().flatten(), data_min, data_max)
+    
+    final_dist_phys = np.linalg.norm(target_phys - final_pos_phys)
     print("-" * 60)
-    print(f"🏁 最终停止位置离目标的距离: {final_dist:.6f}")
-
+    print(f"🏁 最终停止位置离目标的物理距离: {final_dist_phys:.6f} rad")
 import argparse
 
 def main():
@@ -541,7 +553,7 @@ def main():
     if(args.mode == 'train'):
         train()
     elif args.mode == 'test':
-        test_generate()
+        test()
                 
         
 if __name__ == "__main__":
