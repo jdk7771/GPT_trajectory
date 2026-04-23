@@ -19,7 +19,7 @@ def generate_minimum_jerk_trajectory(start, end, steps):
     trajectory = start + (end - start) * tau
     return trajectory
 
-def generate_mujoco_data(nums_sample=5000, steps_len=60, dim=6):
+def generate_mujoco_data(nums_sample=5000, steps_len=20, dim=6):
     print("🚀 开始基于官方 UR5e 模型生成物理动力学数据...")
     
     # 1. 加载官方 UR5e XML 模型 (替换为你电脑上的绝对路径)
@@ -36,6 +36,7 @@ def generate_mujoco_data(nums_sample=5000, steps_len=60, dim=6):
     # 2. 获取 UR5e 的 6 个关节的物理角度极限 (避免折断机械臂)
     lower_bounds = model.jnt_range[:6, 0]
     upper_bounds = model.jnt_range[:6, 1]
+
     # 3. 极其关键的频率设置！
     # 仿真器底层 timestep 通常是 0.002s (500Hz)
     # 如果我们的控制频率是 60 步，单纯跑 60 个 timestep 只有 0.12 秒，机械臂会因为加速度过大而飞车。
@@ -80,7 +81,6 @@ def generate_mujoco_data(nums_sample=5000, steps_len=60, dim=6):
         if (i + 1) % 500 == 0:
             print(f"✅ 已生成 {i + 1}/{nums_sample} 条轨迹...")
 
-    # 4. 保存为你的网络需要的格式
     save_dir = "/home/jiang/snap/GenerateTra/data"
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, "tardata.npy")

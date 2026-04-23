@@ -11,7 +11,7 @@ from torch.utils.data import Dataset,DataLoader
 
 generate为什么要shape-2 这个
                     不想思考了，名后天再考虑
-这个问题很大，就是预测时候，只能预测输入的 16-T 因为如果超过就要重新 进行编码，所以进行了全局编码，
+
 """
 device = 'cuda' if torch.cuda.is_available else 'cpu'
 
@@ -53,7 +53,7 @@ class TrajectoryData(Dataset):
         
         x = torch.cat((endpos.unsqueeze(0) , x))
         
-        return x,y
+        return x,y,start_idx
     
     
     
@@ -86,15 +86,15 @@ def estimate_loss():
         for i in range(val_iter):
             
             try:
-                x,y= next(loader_iter)
+                x,y,start_idx = next(loader_iter)
                 
             except StopIteration:
                 
                 loader_iter = iter(train_loader if spilt == 'train' else val_loader)
                     
-                x, y = next(loader_iter)
+                x, y,start_idx = next(loader_iter)
 
-            logit,loss = model(x,y,use_cache = 0)
+            logit,loss = model(x,y,use_cache = 0,start_idx= start_idx)
             
             losses[i] = loss
             
@@ -112,7 +112,7 @@ head_size = 256
 dropout = 0.1
 embedding_dim = 512
 head_nums = 8
-n_layer = 5
+n_layer = 3
 learn_rate = 3e-4
 train_iter = 300
 max_pre = 500
@@ -262,14 +262,12 @@ class PreTrajectmodel(nn.Module):
                 head.clear_cache()
 
 
-    def forward(self,x,target= None,use_cache = 0):
+    def forward(self,x,target= None,use_cache = 0,start_idx = 0):
         B,T_input,C = x.shape
         
         x = self.projectdim2embedding(x)
         if (T_input>1):
-
-            position_embe = self.position_embedding(torch.arange(0,T_input-1,device=device).unsqueeze(0)) 
-            position_embe = position_embe.expand(B,-1,-1)
+            position_embe = self.position_embedding(torch.arange(0,T_input-1,device=device).unsqueeze(0) + torch.as_tensor(start_idx,device=device)) 
             position_embe = torch.cat((torch.zeros((B,1,embedding_dim),device=device),position_embe),dim = 1)
 
             embedding = x+ position_embe
@@ -277,10 +275,8 @@ class PreTrajectmodel(nn.Module):
         else:
             # KV Cache 的自回归 Decode 阶段
             # 此时传入的 T=1 纯粹是当前步的轨迹点，必须叠加正确的时间步
-            current_pos = self.blocks[0].multiahead.multihead[0].k_cache.shape[1]
-            pos_seq = torch.tensor([[current_pos]], device=device)
-            embedding = x + self.position_embedding(pos_seq)
-
+            pos_seq = torch.arange(0, 1, device=device).unsqueeze(0) + torch.as_tensor(start_idx, device=device)
+            embedding = x + self.position_embedding(pos_seq)        
         # x = self.block(embedding,use_cache)
 
         for block in self.blocks:
@@ -308,7 +304,7 @@ class PreTrajectmodel(nn.Module):
                 else:
                     idxes = x
 
-                logits,_ = self(idxes,use_cache = use_cache)
+                logits,_ = self(idxes,use_cache = use_cache,start_idx = 0)
                 current = logits[:,-1:,:]
 
                 print(current)
@@ -321,12 +317,12 @@ class PreTrajectmodel(nn.Module):
         else:
             self.reset_cache()
             idxes = x[:,-block_size:,:]
-            logits,_ = self(idxes,use_cache = use_cache)
+            logits,_ = self(idxes,use_cache = use_cache,start_idx = 0)
             current = logits[:,-1:,:]
             x = torch.cat((x,current),dim=1)
 
             for i in range(max_pre-1):
-                logits,_ = self(current,use_cache = use_cache)
+                logits,_ = self(current,use_cache = use_cache,start_idx = x.shape[1]-2)
                 current = logits[:,-1:,:]
                 x = torch.cat((x,current),dim=1)
                 print(f"当下位置为{current}")
@@ -346,12 +342,12 @@ def train():
     for i in range(train_iter):
         optimizer.zero_grad()
         try:
-            x,y = next(train_loder_iter)
+            x,y,start_idx = next(train_loder_iter)
         except StopIteration:
             train_loder_iter  = iter(train_loader)
-            x,y = next(train_loder_iter)
+            x,y,start_idx = next(train_loder_iter)
             
-        logit,loss = model(x,y,use_cache = 0)
+        logit,loss = model(x,y,use_cache = 0,start_idx = start_idx)
         
         loss.backward()
         
@@ -376,12 +372,11 @@ def test():
     end  : [ 0.91539425 -0.7622603  -0.41337305  0.8251397  -0.48477328  0.43935925]
 
     """
-    start = torch.tensor([0.7739929,  -0.4180572,  -0.31565446,  0.6180305  ,-0.52063376 , 0.5154103],dtype= torch.float32,device=device)
+    start = torch.tensor([ 0.83339864, -0.5571846,  -0.34901676,  0.70504457, -0.51074445,  0.48726186],dtype= torch.float32,device=device)
     end = torch.tensor([ 0.91539425 ,-0.7622603 , -0.41337305 , 0.8251397 , -0.48477328 , 0.43935925],dtype= torch.float32,device=device)
     
     idx = torch.stack((end,start),dim=0).unsqueeze(0)
-    input(idx.shape)
-    model.generate(idx,max_pre = 5,threshold=0.01,use_cache=1)
+    model.generate(idx,max_pre = 50,threshold=0.01,use_cache=1)
 
 import argparse
 
